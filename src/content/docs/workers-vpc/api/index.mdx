@@ -29,7 +29,7 @@ A VPC Service binding routes requests to a specific pre-registered host and port
 
 ### VPC Network
 
-A VPC Network binding grants access to any service reachable through the bound tunnel or Cloudflare Mesh. The URL passed to `fetch()` determines the actual destination — hostname or IP address and port.
+A VPC Network binding grants access to any service reachable through the bound Cloudflare Tunnel, through Cloudflare Mesh, or through a Cloudflare WAN on-ramp (GRE, IPsec, or CNI). The URL passed to `fetch()` determines the actual destination — hostname or IP address and port.
 
 ## fetch()
 
