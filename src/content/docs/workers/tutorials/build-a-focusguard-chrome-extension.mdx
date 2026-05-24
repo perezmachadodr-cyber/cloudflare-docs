@@ -1,0 +1,1131 @@
+---
+difficulty: Intermediate
+pcx_content_type: tutorial
+title: Build a FocusGuard Chrome extension
+description: Learn how to build a Chrome extension that tracks time spent on websites, sets daily usage goals, and blocks distracting sites during focus sessions.
+products:
+  - workers
+tags:
+  - JavaScript
+  - Chrome Extension
+reviewed: 2026-05-23
+---
+
+In this tutorial, you will build FocusGuard: a Chrome extension that tracks time spent on each domain, lets you set daily browsing goals, blocks distracting sites during timed focus sessions, and visualizes your browsing history in an analytics dashboard.
+
+By the end of this tutorial you will have a working Chrome extension with:
+
+- Automatic per-domain time tracking that persists across browser sessions.
+- A configurable blocklist enforced only when a focus session is active.
+- Daily usage goals with visual progress indicators.
+- A full-screen dashboard with bar and doughnut charts powered by Chart.js.
+- A CSV export of your daily browsing data.
+
+---
+
+## Prerequisites
+
+Before you begin, make sure you have:
+
+- Google Chrome (or a Chromium-based browser) installed.
+- Basic familiarity with HTML, CSS, and JavaScript.
+- A text editor of your choice.
+
+---
+
+## 1. Set up the project
+
+Create a new directory for the extension and add the files you will need:
+
+```sh
+mkdir focusguard
+cd focusguard
+mkdir icons
+```
+
+Your finished project will contain the following files:
+
+```txt
+focusguard/
+├── manifest.json
+├── background.js
+├── popup.html
+├── popup.js
+├── blocked.html
+├── dashboard.html
+├── dashboard.js
+└── icons/
+    ├── icon16.png
+    ├── icon48.png
+    └── icon128.png
+```
+
+Add placeholder PNG files in the `icons/` directory. You can replace them with your own artwork later.
+
+---
+
+## 2. Create the manifest
+
+The `manifest.json` file tells Chrome about your extension, which permissions it needs, and which files to use as the background service worker and popup.
+
+Create `manifest.json`:
+
+```json
+{
+  "manifest_version": 3,
+  "name": "FocusGuard – Daily Tab & Time Tracker",
+  "version": "1.0.0",
+  "description": "Tracks time spent on each domain, sets daily focus goals, and blocks distracting sites during work sessions.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "FocusGuard"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
+```
+
+Key points:
+
+- `"manifest_version": 3` is the current standard for Chrome extensions.
+- `"storage"` lets the extension use `chrome.storage.local` to persist data without a backend.
+- `"tabs"` lets the extension read the URL of the active tab so it can track which domain is open.
+- `"alarms"` lets the extension schedule periodic flushes of tracked time and trigger focus-session end events.
+
+---
+
+## 3. Build the background service worker
+
+The background service worker (`background.js`) runs continuously in the background. It has two responsibilities:
+
+1. Record how many seconds the user spends on each domain per day.
+2. Redirect blocked domains to a blocked page when a focus session is active.
+
+Create `background.js`:
+
+```js
+"use strict";
+
+let activeTabId   = null;
+let activeOrigin  = null;
+let sessionStart  = null;
+
+function extractDomain(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.hostname.replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+function todayKey() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function flushTime() {
+  if (!activeOrigin || !sessionStart) return;
+  const elapsed = Math.floor((Date.now() - sessionStart) / 1000);
+  if (elapsed < 1) return;
+
+  const key = "usage_" + todayKey();
+  chrome.storage.local.get({ [key]: {} }, (res) => {
+    const usage = res[key];
+    usage[activeOrigin] = (usage[activeOrigin] || 0) + elapsed;
+    chrome.storage.local.set({ [key]: usage });
+  });
+  sessionStart = Date.now();
+}
+
+function startTracking(tabId, url) {
+  flushTime();
+  activeTabId  = tabId;
+  activeOrigin = extractDomain(url);
+  sessionStart = activeOrigin ? Date.now() : null;
+
+  if (activeOrigin) checkBlock(activeOrigin, tabId, url);
+}
+
+function checkBlock(domain, tabId, url) {
+  chrome.storage.local.get({ focusActive: false, blockList: [] }, (res) => {
+    if (!res.focusActive) return;
+    const blocked = res.blockList.some(b => domain === b || domain.endsWith("." + b));
+    if (blocked) {
+      const redirectUrl = chrome.runtime.getURL("blocked.html") +
+        "?site=" + encodeURIComponent(domain);
+      chrome.tabs.update(tabId, { url: redirectUrl });
+    }
+  });
+}
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  chrome.tabs.get(tabId, (tab) => {
+    if (chrome.runtime.lastError || !tab.url) return;
+    startTracking(tabId, tab.url);
+  });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete" && tab.active) {
+    startTracking(tabId, tab.url || "");
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === activeTabId) flushTime();
+});
+
+chrome.alarms.create("flush", { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "flush") flushTime();
+  if (alarm.name === "focusEnd") {
+    chrome.storage.local.set({ focusActive: false });
+  }
+});
+```
+
+### How time tracking works
+
+The service worker maintains three variables — `activeTabId`, `activeOrigin`, and `sessionStart` — to track the currently active tab.
+
+Whenever the active tab changes (via `onActivated` or `onUpdated`), `flushTime` is called first to write elapsed seconds to storage, and then the variables reset for the new tab. A `"flush"` alarm fires every 30 seconds as a safety net to avoid losing time if the browser closes unexpectedly.
+
+Time is stored in `chrome.storage.local` under a key like `usage_2026-05-23`, which is an object mapping domain strings to accumulated seconds.
+
+### How blocking works
+
+`checkBlock` reads `focusActive` and `blockList` from storage. If the current domain matches any entry in the blocklist (including subdomains), Chrome redirects the tab to `blocked.html` with the blocked domain passed as a query parameter. Blocking is only active when a focus session is running, so the user can browse freely outside of focus time.
+
+---
+
+## 4. Create the blocked page
+
+When a user navigates to a blocked site during a focus session, they land on `blocked.html`.
+
+Create `blocked.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Site Blocked – FocusGuard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      text-align: center;
+      padding: 24px;
+    }
+    .card {
+      background: #1a1d27;
+      border: 1px solid #2d3048;
+      border-radius: 16px;
+      padding: 48px 40px;
+      max-width: 440px;
+      width: 100%;
+    }
+    .shield { font-size: 56px; margin-bottom: 16px; }
+    h1 { font-size: 22px; font-weight: 700; margin-bottom: 8px; color: #f1f5f9; }
+    .site-name {
+      font-size: 15px;
+      font-weight: 600;
+      color: #6c63ff;
+      background: rgba(108,99,255,0.1);
+      border-radius: 6px;
+      display: inline-block;
+      padding: 4px 12px;
+      margin-bottom: 16px;
+    }
+    p { font-size: 14px; color: #94a3b8; line-height: 1.6; margin-bottom: 28px; }
+    .actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    button {
+      padding: 10px 22px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+    }
+    .btn-back    { background: #6c63ff; color: #fff; }
+    .btn-bypass  { background: #1e2235; color: #94a3b8; border: 1px solid #2d3048; }
+    .btn-back:hover   { background: #5b54e0; }
+    .btn-bypass:hover { background: #262a3f; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="shield">🛡️</div>
+    <h1>Site Blocked</h1>
+    <div class="site-name" id="site-name">this site</div>
+    <p>This site is on your FocusGuard blocklist. Your focus session is currently active. Stay on track.</p>
+    <div class="actions">
+      <button class="btn-back" onclick="history.back()">← Go Back</button>
+      <button class="btn-bypass" id="btn-bypass">Bypass Once</button>
+    </div>
+  </div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const site   = params.get("site") || "this site";
+    document.getElementById("site-name").textContent = site;
+
+    document.getElementById("btn-bypass").addEventListener("click", () => {
+      history.back();
+      setTimeout(() => { location.href = "https://" + site; }, 100);
+    });
+  </script>
+</body>
+</html>
+```
+
+The page reads the `?site=` query parameter injected by `checkBlock` and shows it to the user. **Bypass Once** navigates back and then immediately opens the blocked URL — a deliberate two-step to discourage impulsive bypasses.
+
+---
+
+## 5. Build the popup
+
+The popup (`popup.html` and `popup.js`) is what the user sees when they select the extension icon.
+
+### Create popup.html
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FocusGuard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      width: 340px;
+      min-height: 420px;
+      padding: 0;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 16px 12px;
+      border-bottom: 1px solid #1e2235;
+    }
+    .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; }
+    .logo .shield { font-size: 20px; }
+    .subtitle { font-size: 10px; color: #64748b; letter-spacing: 0.5px; text-transform: uppercase; }
+    #date-label { font-size: 11px; color: #64748b; }
+
+    /* Focus session strip */
+    .focus-strip {
+      background: #12151f;
+      border-bottom: 1px solid #1e2235;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .focus-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; flex: 1; }
+    #focus-status { font-size: 12px; font-weight: 600; color: #64748b; }
+    #focus-status.active { color: #4ade80; }
+    #focus-countdown { font-size: 13px; font-weight: 700; color: #6c63ff; min-width: 42px; text-align: right; }
+    .focus-controls { display: flex; align-items: center; gap: 6px; }
+    input[type="number"] {
+      width: 48px; background: #1a1d27; border: 1px solid #2d3048;
+      border-radius: 6px; color: #e2e8f0; font-size: 12px; padding: 4px 6px; text-align: center;
+    }
+    .btn-focus {
+      padding: 5px 12px; border-radius: 6px; font-size: 12px; font-weight: 600;
+      cursor: pointer; border: none; background: #6c63ff; color: #fff;
+    }
+    .btn-focus.stop { background: #ef4444; }
+
+    /* Tabs */
+    .tabs { display: flex; border-bottom: 1px solid #1e2235; }
+    .tab-btn {
+      flex: 1; padding: 9px 4px; font-size: 11px; font-weight: 600; cursor: pointer;
+      background: none; border: none; color: #64748b; border-bottom: 2px solid transparent;
+      letter-spacing: 0.3px;
+    }
+    .tab-btn.active { color: #6c63ff; border-bottom-color: #6c63ff; }
+
+    /* Panels */
+    .panel { display: none; padding: 12px 14px; }
+    .panel.active { display: block; }
+    .panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .panel-title { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    #total-today { font-size: 11px; color: #94a3b8; }
+
+    /* Usage rows */
+    .usage-row { margin-bottom: 10px; }
+    .usage-row-top { display: flex; justify-content: space-between; margin-bottom: 3px; }
+    .usage-domain { font-size: 12px; font-weight: 600; color: #e2e8f0; }
+    .usage-time { font-size: 11px; color: #94a3b8; }
+    .usage-bar-bg { background: #1a1d27; border-radius: 4px; height: 5px; }
+    .usage-bar-fill { height: 5px; border-radius: 4px; background: #6c63ff; transition: width 0.3s; }
+    .usage-bar-fill.goal   { background: #fbbf24; }
+    .usage-bar-fill.danger { background: #ef4444; }
+    .empty-msg { font-size: 12px; color: #64748b; text-align: center; padding: 20px 0; }
+
+    /* Block list & goals */
+    .input-row { display: flex; gap: 6px; margin-bottom: 10px; }
+    .input-row input[type="text"] {
+      flex: 1; background: #1a1d27; border: 1px solid #2d3048; border-radius: 6px;
+      color: #e2e8f0; font-size: 12px; padding: 6px 10px;
+    }
+    .btn-add {
+      padding: 6px 12px; background: #6c63ff; color: #fff; border: none;
+      border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+    .block-item, .goal-item {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 6px 10px; background: #1a1d27; border-radius: 6px; margin-bottom: 5px;
+      font-size: 12px;
+    }
+    .goal-item-left { display: flex; flex-direction: column; gap: 1px; }
+    .goal-item-domain { font-weight: 600; color: #e2e8f0; }
+    .goal-item-limit  { font-size: 10px; color: #64748b; }
+    .btn-remove {
+      background: none; border: none; color: #64748b; cursor: pointer; font-size: 14px; padding: 0 2px;
+    }
+    .btn-remove:hover { color: #ef4444; }
+
+    /* Dashboard button */
+    .dash-row { margin-top: 10px; }
+    #btn-dash {
+      width: 100%; padding: 9px; background: #1a1d27; border: 1px solid #2d3048;
+      border-radius: 8px; color: #94a3b8; font-size: 12px; cursor: pointer; font-weight: 600;
+    }
+    #btn-dash:hover { background: #1e2235; color: #e2e8f0; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo"><span class="shield">🛡️</span> FocusGuard <span class="subtitle">Tab Time Tracker &amp; Site Blocker</span></div>
+    <span id="date-label"></span>
+  </header>
+
+  <div class="focus-strip">
+    <span class="focus-label">Focus Session</span>
+    <span id="focus-status">Inactive</span>
+    <span id="focus-countdown"></span>
+    <div class="focus-controls">
+      <input type="number" id="focus-minutes" value="25" min="1" max="180" />
+      <span style="font-size:10px;color:#64748b">min</span>
+      <button class="btn-focus" id="btn-focus">Start Focus</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="today">📊 Today</button>
+    <button class="tab-btn" data-tab="block">🚫 Block List</button>
+    <button class="tab-btn" data-tab="goals">🎯 Goals</button>
+  </div>
+
+  <!-- Today panel -->
+  <div class="panel active" id="tab-today">
+    <div class="panel-header">
+      <span class="panel-title">Time by Domain</span>
+      <span id="total-today"></span>
+    </div>
+    <div id="usage-list"><p class="empty-msg">No browsing data for today yet.</p></div>
+    <div class="dash-row">
+      <button id="btn-dash">View Full Dashboard →</button>
+    </div>
+  </div>
+
+  <!-- Block list panel -->
+  <div class="panel" id="tab-block">
+    <div class="input-row">
+      <input type="text" id="block-input" placeholder="example.com" />
+      <button class="btn-add" id="btn-add-block">Add</button>
+    </div>
+    <div id="block-list"></div>
+  </div>
+
+  <!-- Goals panel -->
+  <div class="panel" id="tab-goals">
+    <div class="input-row">
+      <input type="text" id="goal-domain" placeholder="example.com" style="flex:2" />
+      <input type="number" id="goal-minutes" value="30" min="1" style="width:56px" />
+      <button class="btn-add" id="btn-add-goal">Add</button>
+    </div>
+    <div id="goals-list"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
+```
+
+### Create popup.js
+
+`popup.js` handles all UI interactions for the popup: rendering usage data, managing the blocklist and goals, and controlling the focus session timer.
+
+```js
+"use strict";
+
+function todayKey() {
+  const d = new Date();
+  return `usage_${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+}
+
+function fmtTime(seconds) {
+  if (seconds < 60) return seconds + "s";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${s}s`;
+}
+
+function fmtCountdown(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+
+function todayDateLabel() {
+  return new Date().toLocaleDateString("en-US", { weekday:"short", month:"short", day:"numeric" });
+}
+
+const usageList       = document.getElementById("usage-list");
+const totalToday      = document.getElementById("total-today");
+const focusStatus     = document.getElementById("focus-status");
+const focusCountdown  = document.getElementById("focus-countdown");
+const btnFocus        = document.getElementById("btn-focus");
+const focusMinInput   = document.getElementById("focus-minutes");
+const blockInput      = document.getElementById("block-input");
+const btnAddBlock     = document.getElementById("btn-add-block");
+const blockListEl     = document.getElementById("block-list");
+const goalDomainInput = document.getElementById("goal-domain");
+const goalMinInput    = document.getElementById("goal-minutes");
+const btnAddGoal      = document.getElementById("btn-add-goal");
+const goalsListEl     = document.getElementById("goals-list");
+const btnDash         = document.getElementById("btn-dash");
+const dateLabel       = document.getElementById("date-label");
+
+// Tab switching
+document.querySelectorAll(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach(p => p.classList.remove("active"));
+    btn.classList.add("active");
+    document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+  });
+});
+
+function renderUsage(usage, goals) {
+  const entries = Object.entries(usage).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) {
+    usageList.innerHTML = '<p class="empty-msg">No browsing data for today yet.</p>';
+    totalToday.textContent = "";
+    return;
+  }
+
+  const maxSec   = entries[0][1];
+  const totalSec = entries.reduce((a, e) => a + e[1], 0);
+  totalToday.textContent = "Total: " + fmtTime(totalSec);
+
+  usageList.innerHTML = "";
+  entries.forEach(([domain, secs]) => {
+    const limitSecs = goals[domain] ? goals[domain] * 60 : null;
+    const pct       = Math.min(100, Math.round((secs / maxSec) * 100));
+    const overGoal  = limitSecs && secs > limitSecs;
+    const nearGoal  = limitSecs && !overGoal && secs > limitSecs * 0.8;
+    const barClass  = overGoal ? "danger" : (nearGoal ? "goal" : "");
+
+    const row = document.createElement("div");
+    row.className = "usage-row";
+    row.innerHTML = `
+      <div class="usage-row-top">
+        <span class="usage-domain">${domain}</span>
+        <span class="usage-time">${fmtTime(secs)}${limitSecs ? " / " + fmtTime(limitSecs) : ""}</span>
+      </div>
+      <div class="usage-bar-bg">
+        <div class="usage-bar-fill ${barClass}" style="width:${pct}%"></div>
+      </div>
+    `;
+    usageList.appendChild(row);
+  });
+}
+
+function renderBlockList(list) {
+  blockListEl.innerHTML = "";
+  if (list.length === 0) {
+    blockListEl.innerHTML = '<p class="empty-msg" style="padding:10px 0;">No sites blocked yet.</p>';
+    return;
+  }
+  list.forEach((domain, idx) => {
+    const item = document.createElement("div");
+    item.className = "block-item";
+    item.innerHTML = `<span>${domain}</span><button class="btn-remove" data-idx="${idx}" title="Remove">&#10005;</button>`;
+    blockListEl.appendChild(item);
+  });
+  blockListEl.querySelectorAll(".btn-remove").forEach(btn => {
+    btn.addEventListener("click", () => {
+      chrome.storage.local.get({ blockList: [] }, (res) => {
+        res.blockList.splice(parseInt(btn.dataset.idx), 1);
+        chrome.storage.local.set({ blockList: res.blockList }, loadAll);
+      });
+    });
+  });
+}
+
+btnAddBlock.addEventListener("click", () => {
+  const val = blockInput.value.trim().toLowerCase().replace(/^www\./, "");
+  if (!val) return;
+  chrome.storage.local.get({ blockList: [] }, (res) => {
+    if (!res.blockList.includes(val)) res.blockList.push(val);
+    chrome.storage.local.set({ blockList: res.blockList }, () => {
+      blockInput.value = "";
+      loadAll();
+    });
+  });
+});
+
+blockInput.addEventListener("keydown", (e) => { if (e.key === "Enter") btnAddBlock.click(); });
+
+function renderGoals(goals) {
+  goalsListEl.innerHTML = "";
+  const entries = Object.entries(goals);
+  if (entries.length === 0) {
+    goalsListEl.innerHTML = '<p class="empty-msg" style="padding:10px 0;">No goals set yet.</p>';
+    return;
+  }
+  entries.forEach(([domain, mins]) => {
+    const item = document.createElement("div");
+    item.className = "goal-item";
+    item.innerHTML = `
+      <div class="goal-item-left">
+        <span class="goal-item-domain">${domain}</span>
+        <span class="goal-item-limit">Limit: ${mins} min/day</span>
+      </div>
+      <button class="btn-remove" data-domain="${domain}" title="Remove">&#10005;</button>
+    `;
+    goalsListEl.appendChild(item);
+  });
+  goalsListEl.querySelectorAll(".btn-remove").forEach(btn => {
+    btn.addEventListener("click", () => {
+      chrome.storage.local.get({ goals: {} }, (res) => {
+        delete res.goals[btn.dataset.domain];
+        chrome.storage.local.set({ goals: res.goals }, loadAll);
+      });
+    });
+  });
+}
+
+btnAddGoal.addEventListener("click", () => {
+  const domain = goalDomainInput.value.trim().toLowerCase().replace(/^www\./, "");
+  const mins   = parseInt(goalMinInput.value);
+  if (!domain || isNaN(mins) || mins < 1) return;
+  chrome.storage.local.get({ goals: {} }, (res) => {
+    res.goals[domain] = mins;
+    chrome.storage.local.set({ goals: res.goals }, () => {
+      goalDomainInput.value = "";
+      goalMinInput.value = "30";
+      loadAll();
+    });
+  });
+});
+
+let countdownInterval = null;
+
+function updateFocusUI(active, endsAt) {
+  if (active && endsAt) {
+    focusStatus.textContent = "Active";
+    focusStatus.classList.add("active");
+    btnFocus.textContent = "Stop Focus";
+    btnFocus.classList.add("stop");
+    focusMinInput.disabled = true;
+
+    clearInterval(countdownInterval);
+    countdownInterval = setInterval(() => {
+      const remaining = Math.max(0, Math.floor((endsAt - Date.now()) / 1000));
+      focusCountdown.textContent = fmtCountdown(remaining);
+      if (remaining === 0) {
+        clearInterval(countdownInterval);
+        loadAll();
+      }
+    }, 1000);
+    const remaining = Math.max(0, Math.floor((endsAt - Date.now()) / 1000));
+    focusCountdown.textContent = fmtCountdown(remaining);
+  } else {
+    focusStatus.textContent = "Inactive";
+    focusStatus.classList.remove("active");
+    btnFocus.textContent = "Start Focus";
+    btnFocus.classList.remove("stop");
+    focusMinInput.disabled = false;
+    focusCountdown.textContent = "";
+    clearInterval(countdownInterval);
+  }
+}
+
+btnFocus.addEventListener("click", () => {
+  chrome.storage.local.get({ focusActive: false }, (res) => {
+    if (res.focusActive) {
+      chrome.alarms.clear("focusEnd");
+      chrome.storage.local.set({ focusActive: false, focusEndsAt: null }, loadAll);
+    } else {
+      const mins   = Math.max(1, parseInt(focusMinInput.value) || 25);
+      const endsAt = Date.now() + mins * 60 * 1000;
+      chrome.alarms.create("focusEnd", { delayInMinutes: mins });
+      chrome.storage.local.set({ focusActive: true, focusEndsAt: endsAt }, loadAll);
+    }
+  });
+});
+
+function loadAll() {
+  chrome.storage.local.get(
+    { [todayKey()]: {}, blockList: [], goals: {}, focusActive: false, focusEndsAt: null },
+    (res) => {
+      renderUsage(res[todayKey()], res.goals);
+      renderBlockList(res.blockList);
+      renderGoals(res.goals);
+      updateFocusUI(res.focusActive, res.focusEndsAt);
+    }
+  );
+}
+
+btnDash.addEventListener("click", () => {
+  chrome.tabs.create({ url: chrome.runtime.getURL("dashboard.html") });
+});
+
+dateLabel.textContent = todayDateLabel();
+loadAll();
+setInterval(loadAll, 5000);
+```
+
+---
+
+## 6. Build the analytics dashboard
+
+The dashboard is a full-screen page that shows a date selector, summary statistics, bar and doughnut charts, a detailed table, and a CSV export button. It uses [Chart.js](https://www.chartjs.org/) loaded from a CDN.
+
+### Create dashboard.html
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FocusGuard Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117; color: #e2e8f0; min-height: 100vh; padding: 28px 20px;
+    }
+    .page-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 24px; flex-wrap: wrap; gap: 12px;
+    }
+    .page-title { font-size: 20px; font-weight: 700; }
+    .page-subtitle { font-size: 12px; color: #64748b; margin-top: 2px; }
+    .controls { display: flex; align-items: center; gap: 10px; }
+    select {
+      background: #1a1d27; border: 1px solid #2d3048; border-radius: 8px;
+      color: #e2e8f0; font-size: 13px; padding: 7px 12px; cursor: pointer;
+    }
+    /* Stats grid */
+    .stats-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 12px; margin-bottom: 24px;
+    }
+    .stat-card {
+      background: #1a1d27; border: 1px solid #2d3048; border-radius: 10px; padding: 14px 16px;
+    }
+    .stat-label { font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat-value { font-size: 22px; font-weight: 700; color: #f1f5f9; margin: 4px 0 2px; }
+    .stat-desc  { font-size: 10px; color: #64748b; }
+    /* Charts */
+    .charts-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px;
+    }
+    @media (max-width: 640px) { .charts-grid { grid-template-columns: 1fr; } }
+    .chart-card {
+      background: #1a1d27; border: 1px solid #2d3048; border-radius: 10px; padding: 16px;
+    }
+    .chart-title { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px; }
+    .chart-wrap  { position: relative; height: 200px; }
+    /* Table */
+    .table-card {
+      background: #1a1d27; border: 1px solid #2d3048; border-radius: 10px;
+      padding: 16px; overflow-x: auto;
+    }
+    .table-header {
+      display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;
+    }
+    .table-title { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+    .btn-export {
+      padding: 6px 14px; background: #1e2235; border: 1px solid #2d3048; border-radius: 6px;
+      color: #94a3b8; font-size: 11px; font-weight: 600; cursor: pointer;
+    }
+    .btn-export:hover { background: #262a3f; color: #e2e8f0; }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th {
+      text-align: left; padding: 8px 10px; font-size: 10px; color: #64748b;
+      text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #2d3048;
+    }
+    td { padding: 9px 10px; border-bottom: 1px solid #1a2030; }
+    tr:last-child td { border-bottom: none; }
+    .mini-bar-bg  { background: #2d3048; border-radius: 4px; height: 6px; width: 100px; }
+    .mini-bar-fill { height: 6px; border-radius: 4px; background: #6c63ff; }
+    .mini-bar-fill.over { background: #ef4444; }
+    .badge-goal { background: rgba(239,68,68,0.15); color: #ef4444; border-radius: 4px; padding: 2px 7px; font-size: 10px; font-weight: 600; }
+    .badge-ok   { background: rgba(74,222,128,0.15); color: #4ade80; border-radius: 4px; padding: 2px 7px; font-size: 10px; font-weight: 600; }
+    .progress-cell { width: 110px; }
+    #empty-msg { display: none; text-align: center; padding: 30px 0; color: #64748b; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="page-header">
+    <div>
+      <div class="page-title">🛡️ FocusGuard Dashboard</div>
+      <div class="page-subtitle">Browsing time analysis &amp; focus history</div>
+    </div>
+    <div class="controls">
+      <select id="date-select"></select>
+    </div>
+  </div>
+
+  <div class="stats-grid">
+    <div class="stat-card"><div class="stat-label">Date</div><div class="stat-value" id="s-total" style="font-size:16px">—</div><div class="stat-desc">Total time</div></div>
+    <div class="stat-card"><div class="stat-label">Total Time</div><div class="stat-value" id="s-total">—</div><div class="stat-desc">all domains</div></div>
+    <div class="stat-card"><div class="stat-label">Domains Visited</div><div class="stat-value" id="s-domains">—</div><div class="stat-desc">unique sites</div></div>
+    <div class="stat-card"><div class="stat-label">Goals Exceeded</div><div class="stat-value" id="s-exceeded">—</div><div class="stat-desc">over daily limit</div></div>
+    <div class="stat-card"><div class="stat-label">Top Site</div><div class="stat-value" id="s-top" style="font-size:14px">—</div><div class="stat-desc">most time spent</div></div>
+  </div>
+
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-title">Time distribution (top 8)</div>
+      <div class="chart-wrap"><canvas id="bar-chart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Session share</div>
+      <div class="chart-wrap"><canvas id="pie-chart"></canvas></div>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <div class="table-header">
+      <span class="table-title">Domain breakdown</span>
+      <button class="btn-export" id="btn-export">⬇ Export CSV</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Domain</th><th>Time Spent</th><th>Daily Goal</th>
+          <th class="progress-cell">Usage Bar</th><th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="domain-table"></tbody>
+    </table>
+    <p id="empty-msg">No browsing data for the selected date.</p>
+  </div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
+```
+
+### Create dashboard.js
+
+```js
+"use strict";
+
+let barChart = null;
+let pieChart = null;
+
+const COLORS = [
+  "rgba(108,99,255,0.8)", "rgba(74,222,128,0.8)", "rgba(251,191,36,0.8)",
+  "rgba(248,113,113,0.8)", "rgba(56,189,248,0.8)", "rgba(251,146,60,0.8)",
+  "rgba(167,139,250,0.8)", "rgba(244,114,182,0.8)"
+];
+const BORDERS = [
+  "rgb(108,99,255)", "rgb(74,222,128)", "rgb(251,191,36)",
+  "rgb(248,113,113)", "rgb(56,189,248)", "rgb(251,146,60)",
+  "rgb(167,139,250)", "rgb(244,114,182)"
+];
+
+function fmtTime(seconds) {
+  if (seconds < 60) return seconds + "s";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${s}s`;
+}
+
+function buildDateKey(dateStr) { return "usage_" + dateStr; }
+
+function getAvailableDates(allKeys) {
+  return allKeys
+    .filter(k => k.startsWith("usage_"))
+    .map(k => k.replace("usage_", ""))
+    .sort((a, b) => b.localeCompare(a));
+}
+
+function populateDateSelector(dates) {
+  const sel = document.getElementById("date-select");
+  sel.innerHTML = "";
+  if (dates.length === 0) {
+    const opt = document.createElement("option");
+    opt.textContent = "No data yet";
+    sel.appendChild(opt);
+    return;
+  }
+  dates.forEach(d => {
+    const opt = document.createElement("option");
+    opt.value = d;
+    const label = new Date(d + "T12:00:00").toLocaleDateString("en-US",
+      { weekday:"short", month:"short", day:"numeric", year:"numeric" });
+    opt.textContent = label;
+    sel.appendChild(opt);
+  });
+}
+
+function updateStats(usage, goals) {
+  const entries   = Object.entries(usage).sort((a,b) => b[1]-a[1]);
+  const totalSec  = entries.reduce((a,e) => a + e[1], 0);
+  const exceeded  = entries.filter(([d, s]) => goals[d] && s > goals[d] * 60).length;
+  const topDomain = entries.length > 0 ? entries[0][0] : "—";
+
+  document.getElementById("s-total").textContent    = totalSec > 0 ? fmtTime(totalSec) : "0s";
+  document.getElementById("s-domains").textContent  = entries.length;
+  document.getElementById("s-exceeded").textContent = exceeded;
+  document.getElementById("s-top").textContent      = topDomain;
+}
+
+function renderTable(usage, goals) {
+  const tbody    = document.getElementById("domain-table");
+  const emptyMsg = document.getElementById("empty-msg");
+  tbody.innerHTML = "";
+  const entries  = Object.entries(usage).sort((a,b) => b[1]-a[1]);
+
+  if (entries.length === 0) { emptyMsg.style.display = "block"; return; }
+  emptyMsg.style.display = "none";
+
+  entries.forEach(([domain, secs]) => {
+    const limitSecs   = goals[domain] ? goals[domain] * 60 : null;
+    const pct         = limitSecs ? Math.min(100, Math.round((secs / limitSecs) * 100)) : null;
+    const over        = limitSecs && secs > limitSecs;
+    const statusBadge = limitSecs
+      ? (over ? '<span class="badge-goal">Over Limit</span>' : '<span class="badge-ok">On Track</span>')
+      : '<span style="color:var(--muted);font-size:11px;">No goal set</span>';
+    const barHtml = limitSecs
+      ? `<div class="mini-bar-bg"><div class="mini-bar-fill ${over ? "over" : ""}" style="width:${Math.min(100,pct)}px;"></div></div>`
+      : `<span style="color:#64748b;font-size:11px;">—</span>`;
+
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><strong>${domain}</strong></td>
+      <td>${fmtTime(secs)}</td>
+      <td>${limitSecs ? fmtTime(limitSecs) : "—"}</td>
+      <td class="progress-cell">${barHtml}</td>
+      <td>${statusBadge}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function destroyCharts() {
+  if (barChart) { barChart.destroy(); barChart = null; }
+  if (pieChart) { pieChart.destroy(); pieChart = null; }
+}
+
+function renderCharts(usage) {
+  destroyCharts();
+  const entries   = Object.entries(usage).sort((a,b) => b[1]-a[1]).slice(0, 8);
+  const labels    = entries.map(e => e[0]);
+  const values    = entries.map(e => e[1]);
+  const barCanvas = document.getElementById("bar-chart");
+  const pieCanvas = document.getElementById("pie-chart");
+
+  if (entries.length === 0) {
+    barCanvas.parentNode.innerHTML = '<p style="color:#64748b;text-align:center;padding:40px 0;font-size:13px;">No data for this date.</p>';
+    pieCanvas.parentNode.innerHTML = '<p style="color:#64748b;text-align:center;padding:40px 0;font-size:13px;">No data for this date.</p>';
+    return;
+  }
+
+  barChart = new Chart(barCanvas, {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "Seconds", data: values,
+        backgroundColor: COLORS.slice(0, labels.length),
+        borderColor: BORDERS.slice(0, labels.length),
+        borderWidth: 2, borderRadius: 6, borderSkipped: false
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => " " + fmtTime(ctx.parsed.y) } }
+      },
+      scales: {
+        x: {
+          grid: { color: "rgba(255,255,255,0.04)" },
+          ticks: {
+            color: "#64748b", font: { size: 10, family: "inherit" }, maxRotation: 30,
+            callback: function(val) {
+              const l = this.getLabelForValue(val);
+              return l.length > 12 ? l.substring(0,10) + "…" : l;
+            }
+          }
+        },
+        y: {
+          grid: { color: "rgba(255,255,255,0.04)" },
+          ticks: { color: "#64748b", font: { size: 10 }, callback: (v) => fmtTime(v) },
+          beginAtZero: true
+        }
+      }
+    }
+  });
+
+  pieChart = new Chart(pieCanvas, {
+    type: "doughnut",
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: COLORS.slice(0, labels.length),
+        borderColor: "#1a1d27", borderWidth: 3, hoverOffset: 10
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: { color: "#94a3b8", font: { size: 10, family: "inherit" }, padding: 12, usePointStyle: true, pointStyleWidth: 8 }
+        },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const total = ctx.dataset.data.reduce((a,b) => a+b, 0);
+              const pct   = ((ctx.parsed / total)*100).toFixed(1);
+              return ` ${ctx.label}: ${fmtTime(ctx.parsed)} (${pct}%)`;
+            }
+          }
+        }
+      }
+    }
+  });
+}
+
+function exportCSV(usage, goals, dateStr) {
+  const rows = [["Domain","Time (seconds)","Time (formatted)","Daily Goal (min)","Status"]];
+  Object.entries(usage).sort((a,b) => b[1]-a[1]).forEach(([domain, secs]) => {
+    const goalMins = goals[domain] || "";
+    const status   = goals[domain]
+      ? (secs > goals[domain]*60 ? "Over Limit" : "On Track")
+      : "No Goal";
+    rows.push([domain, secs, fmtTime(secs), goalMins, status]);
+  });
+  const csv  = rows.map(r => r.map(c => `"${c}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = `focusguard_${dateStr}.csv`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function loadForDate(dateStr) {
+  const key = buildDateKey(dateStr);
+  chrome.storage.local.get({ [key]: {}, goals: {} }, (res) => {
+    const usage = res[key];
+    const goals = res.goals;
+    updateStats(usage, goals);
+    renderTable(usage, goals);
+    renderCharts(usage);
+    document.getElementById("btn-export").onclick = () => exportCSV(usage, goals, dateStr);
+  });
+}
+
+function init() {
+  chrome.storage.local.get(null, (all) => {
+    const keys  = Object.keys(all);
+    const dates = getAvailableDates(keys);
+    populateDateSelector(dates);
+    const sel = document.getElementById("date-select");
+    sel.addEventListener("change", () => loadForDate(sel.value));
+    if (dates.length > 0) loadForDate(dates[0]);
+  });
+}
+
+document.addEventListener("DOMContentLoaded", init);
+```
+
+---
+
+## 7. Load the extension in Chrome
+
+To test the extension during development:
+
+1. Open Chrome and go to `chrome://extensions`.
+2. Turn on **Developer mode** in the top right corner.
+3. Select **Load unpacked** and choose your `focusguard/` directory.
+4. The FocusGuard icon will appear in the Chrome toolbar. Select it to open the popup.
+
+To see time tracking in action, browse a few websites for a minute and then reopen the popup. Usage data appears under the **Today** tab.
+
+---
+
+## 8. Test focus sessions and blocking
+
+To verify the blocking feature:
+
+1. Open the **Block List** tab in the popup and add a site, for example `youtube.com`.
+2. Set the focus duration to `1` minute and select **Start Focus**.
+3. Open a new tab and go to `youtube.com`. Chrome should redirect you to the blocked page.
+4. Select **Bypass Once** to confirm you can override the block, or select **Go Back** to return.
+5. Wait for the focus session to expire, or select **Stop Focus** in the popup. The block is lifted immediately.
+
+---
+
+## Summary
+
+You have built a Chrome extension with the following parts:
+
+| File | Role |
+| --- | --- |
+| `manifest.json` | Declares permissions and entry points |
+| `background.js` | Tracks time per domain; enforces blocklist during focus sessions |
+| `popup.html` / `popup.js` | Popup UI: usage, blocklist, goals, and focus timer |
+| `blocked.html` | Page shown when a blocked site is visited |
+| `dashboard.html` / `dashboard.js` | Full-screen analytics dashboard with charts and CSV export |
+
+From here you could extend FocusGuard by syncing data across devices using [Cloudflare Workers KV](/kv/) as a remote store, or by adding a daily report sent to a webhook using a [Cloudflare Worker](/workers/).
