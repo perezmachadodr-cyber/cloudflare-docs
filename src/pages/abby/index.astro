@@ -1,0 +1,15 @@
+---
+import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
+import AbbyAgent from "~/components/AbbyAgent";
+
+const frontmatter = {
+	title: "Abby — ABA Documentation Assistant",
+	description:
+		"Abby helps RBTs at D&D Behavior Solutions draft and review ABA session notes with compliance and quality.",
+	template: "splash",
+} as const;
+---
+
+<StarlightPage frontmatter={frontmatter}>
+	<AbbyAgent client:load />
+</StarlightPage>
