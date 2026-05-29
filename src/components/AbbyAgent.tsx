@@ -659,6 +659,77 @@ export default function AbbyAgent() {
 				<div ref={bottomRef} />
 			</div>
 
+			{/* Persistent quick-action bar */}
+			<div
+				style={{
+					width: "100%",
+					maxWidth: 680,
+					padding: "0 28px 10px",
+					boxSizing: "border-box",
+				}}
+			>
+				<div
+					style={{
+						display: "flex",
+						gap: 8,
+						flexWrap: "wrap",
+					}}
+				>
+					{[
+						{ label: "Draft · Ethan R.", msg: "I'd like to draft a session note for Ethan R." },
+						{ label: "Draft · Antoni H.", msg: "I'd like to draft a session note for Antoni H." },
+						{ label: "Review a note", msg: "I'd like to review an existing session note." },
+						{ label: "P1–P12 prompts", msg: "I'd like to run P-PROMPT mode." },
+					].map(({ label, msg }) => (
+						<button
+							key={label}
+							disabled={loading}
+							onClick={() => sendMessage(msg)}
+							style={{
+								background: "white",
+								border: "1px solid #dde3ed",
+								color: "#1e3a5f",
+								padding: "8px 16px",
+								borderRadius: 20,
+								fontFamily: "'Crimson Pro', Georgia, serif",
+								fontSize: 14,
+								fontWeight: 500,
+								cursor: loading ? "default" : "pointer",
+								opacity: loading ? 0.45 : 1,
+								transition: "all 0.16s ease",
+								boxShadow: "0 1px 4px rgba(30,58,95,0.08)",
+								whiteSpace: "nowrap",
+							}}
+							onMouseEnter={(e) => {
+								if (!loading) {
+									(e.currentTarget as HTMLButtonElement).style.background = "#1e3a5f";
+									(e.currentTarget as HTMLButtonElement).style.color = "white";
+									(e.currentTarget as HTMLButtonElement).style.borderColor = "#1e3a5f";
+									(e.currentTarget as HTMLButtonElement).style.boxShadow = "0 3px 10px rgba(30,58,95,0.2)";
+									(e.currentTarget as HTMLButtonElement).style.transform = "translateY(-1px)";
+								}
+							}}
+							onMouseLeave={(e) => {
+								(e.currentTarget as HTMLButtonElement).style.background = "white";
+								(e.currentTarget as HTMLButtonElement).style.color = "#1e3a5f";
+								(e.currentTarget as HTMLButtonElement).style.borderColor = "#dde3ed";
+								(e.currentTarget as HTMLButtonElement).style.boxShadow = "0 1px 4px rgba(30,58,95,0.08)";
+								(e.currentTarget as HTMLButtonElement).style.transform = "none";
+							}}
+						>
+							{label}
+						</button>
+					))}
+				</div>
+				<div
+					style={{
+						height: 1,
+						background: "linear-gradient(to right, #e4eaf3, transparent)",
+						marginTop: 10,
+					}}
+				/>
+			</div>
+
 			{/* Input area */}
 			<div
 				style={{
