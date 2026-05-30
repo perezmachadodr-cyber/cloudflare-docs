@@ -84,6 +84,44 @@ export default class extends WorkerEntrypoint<Env> {
 		const url = new URL(request.url);
 		const { pathname } = url;
 
+		if (pathname === "/api/abby" && request.method === "POST") {
+			if (!this.env.ANTHROPIC_API_KEY) {
+				return new Response(JSON.stringify({ error: "ANTHROPIC_API_KEY not configured" }), {
+					status: 500,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			const body = await request.text();
+			const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"x-api-key": this.env.ANTHROPIC_API_KEY,
+					"anthropic-version": "2023-06-01",
+					"anthropic-dangerous-direct-browser-access": "true",
+				},
+				body,
+			});
+			const data = await upstream.text();
+			return new Response(data, {
+				status: upstream.status,
+				headers: {
+					"Content-Type": "application/json",
+					"Access-Control-Allow-Origin": "*",
+				},
+			});
+		}
+
+		if (pathname === "/api/abby" && request.method === "OPTIONS") {
+			return new Response(null, {
+				headers: {
+					"Access-Control-Allow-Origin": "*",
+					"Access-Control-Allow-Methods": "POST, OPTIONS",
+					"Access-Control-Allow-Headers": "Content-Type",
+				},
+			});
+		}
+
 		if (pathname === "/.well-known/api-catalog") {
 			return new Response(API_CATALOG, {
 				headers: {
