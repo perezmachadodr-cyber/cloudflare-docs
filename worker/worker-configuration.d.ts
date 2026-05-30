@@ -3,6 +3,7 @@
 interface Env {
 	ASSETS: Fetcher;
 	MIDDLECACHE: R2Bucket;
+	ANTHROPIC_API_KEY: string;
 }
 declare module "*/__redirects" {
 	const value: string;
