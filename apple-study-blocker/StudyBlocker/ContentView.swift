@@ -38,8 +38,8 @@ struct ContentView: View {
                         } label: {
                             Label("Terminar sesión", systemImage: "stop.circle.fill")
                         }
-                        Label("Bloqueo activo: solo tus apps permitidas funcionan",
-                              systemImage: "lock.fill")
+                        Label("Bloqueo activo en este dispositivo y en tus otros dispositivos con la app instalada",
+                              systemImage: "lock.icloud.fill")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {

@@ -26,12 +26,33 @@ final class StudyModel: ObservableObject {
     @Published var startTime = DateComponents(hour: 8, minute: 0)
     @Published var endTime = DateComponents(hour: 12, minute: 0)
 
+    private var remoteChangeObserver: NSObjectProtocol?
+
     init() {
         allowedSelection = SharedStore.loadSelection()
         let schedule = SharedStore.loadSchedule()
         scheduleEnabled = schedule.enabled
         startTime = schedule.start
         endTime = schedule.end
+
+        // Si otro dispositivo inicia/termina la sesión (vía iCloud),
+        // refleja el cambio en esta UI.
+        remoteChangeObserver = NotificationCenter.default.addObserver(
+            forName: .studySessionDidChangeRemotely,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshFromSharedStore() }
+        }
+    }
+
+    /// Relee el estado persistido (lo actualizan los reconciles de iCloud
+    /// y la extensión de horario) sin volver a escribirlo.
+    func refreshFromSharedStore() {
+        let stored = SharedStore.isSessionActive
+        if stored != isSessionActive {
+            isSessionActive = stored
+        }
     }
 
     // MARK: - Sesión manual
@@ -39,11 +60,15 @@ final class StudyModel: ObservableObject {
     func startStudying() {
         ShieldController.startBlocking(allowing: allowedSelection)
         isSessionActive = true
+        // Avisa a tus otros dispositivos (push silencioso vía CloudKit)
+        // para que apliquen su propio bloqueo local.
+        Task { await CloudSessionSync.publish(isActive: true) }
     }
 
     func stopStudying() {
         ShieldController.stopBlocking()
         isSessionActive = false
+        Task { await CloudSessionSync.publish(isActive: false) }
     }
 
     // MARK: - Horario automático

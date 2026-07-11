@@ -9,15 +9,24 @@ App para iOS/iPadOS que bloquea **todas** las aplicaciones del dispositivo mient
 | `DeviceActivity` | Programar horarios de estudio que activan/desactivan el bloqueo automáticamente, incluso con la app cerrada |
 | `ManagedSettingsUI` | Personalizar la pantalla que aparece al abrir una app bloqueada |
 
-## ⚠️ Limitación importante: el bloqueo es por dispositivo
+## 🔄 Bloqueo en TODOS tus dispositivos: cómo lo hace Flow y cómo lo hace esta app
 
-Apple **no permite** que una app en tu iPhone bloquee remotamente tu iPad u otros dispositivos de tu mismo Apple ID (eso solo existe para cuentas de niños con "En Familia"). Para cubrir todos tus dispositivos:
+Apps como **Flow**, Opal o Jomo dan la sensación de "bloquear todos los dispositivos de tu iCloud a la vez", pero técnicamente ninguna app puede bloquear remotamente otro dispositivo: Apple no lo permite (los shields de `ManagedSettings` son locales, y los tokens de apps de `FamilyControls` no se pueden transferir entre dispositivos — es una restricción de privacidad de la API). Lo que hacen en realidad es **sincronizar la SESIÓN, no el bloqueo**:
 
-1. Instala esta app en **cada** dispositivo (iPhone y iPad; comparten el mismo código).
-2. En cada dispositivo, elige una vez las apps permitidas (los "tokens" de apps que usa Apple son opacos y **no son transferibles entre dispositivos**, así que la selección se hace localmente en cada uno).
-3. El **horario de estudio** sí se sincroniza automáticamente entre tus dispositivos vía iCloud (`NSUbiquitousKeyValueStore`), de modo que al cambiar el horario en un dispositivo, los demás lo adoptan.
+1. La app está instalada en **cada** dispositivo (por eso Flow existe para iPhone, iPad, Mac y Watch).
+2. En cada dispositivo eliges una vez tus apps permitidas/bloqueadas (localmente).
+3. Al iniciar una sesión en un dispositivo, la sesión se publica en **iCloud (CloudKit, base de datos privada)**.
+4. iCloud envía un **push silencioso** a tus demás dispositivos, que despiertan en segundo plano y aplican **su propio bloqueo local** con su propia lista. El efecto neto: pulsas "empezar" en el iPhone y a los pocos segundos el iPad también está bloqueado.
 
-> Alternativa sin programar nada: Screen Time nativo ("Tiempo de uso" → "Tiempo de inactividad" + "Apps permitidas siempre") con "Compartir entre dispositivos" activado hace algo muy parecido. Esta app te da control total, botón manual de inicio/fin y pantalla de bloqueo personalizada.
+Esta app implementa exactamente ese patrón en `Managers/CloudSessionSync.swift`:
+
+- **Publicar**: `startStudying()`/`stopStudying()` guardan un registro `StudySession` (`isActive`) en la base privada de CloudKit.
+- **Suscribir**: cada dispositivo crea una `CKQuerySubscription` con push silencioso (`shouldSendContentAvailable`).
+- **Reconciliar**: al recibir el push (o al abrir la app / volver a primer plano), el dispositivo lee el estado en iCloud y aplica/retira el escudo con su lista local.
+
+Limitación heredada de iOS (afecta igual a Flow): si **fuerzas el cierre** de la app en un dispositivo (swipe up en multitarea), iOS deja de entregarle pushes silenciosos; ese dispositivo se pondrá al día cuando la abras de nuevo, y el **horario automático** (`DeviceActivity`) sigue funcionando siempre porque lo ejecuta el sistema. El horario también se sincroniza entre dispositivos vía iCloud (`NSUbiquitousKeyValueStore`).
+
+> Alternativa sin programar nada: Screen Time nativo ("Tiempo de uso" → "Tiempo de inactividad" + "Apps permitidas siempre") con "Compartir entre dispositivos" activado hace algo muy parecido. Esta app te da control total, botón manual de inicio/fin sincronizado y pantalla de bloqueo personalizada.
 
 ## Requisitos
 
@@ -38,13 +47,16 @@ Este repositorio contiene el código fuente; el proyecto de Xcode se crea así (
 4. **Capabilities** (en los TRES targets: app + 2 extensiones):
    - **Family Controls**
    - **App Groups**, con el grupo `group.com.tunombre.studyblocker` (cámbialo por tu identificador y actualiza la constante `appGroupID` en `Shared/SharedStore.swift`).
-5. Solo en la app principal, añade también la capability **iCloud → Key-value storage** (para sincronizar el horario entre dispositivos).
+5. Solo en la app principal, añade también:
+   - **iCloud → Key-value storage** (sincroniza el horario entre dispositivos) **y CloudKit** con el contenedor por defecto `iCloud.<tu bundle id>` (sincroniza el inicio/fin de sesión entre dispositivos, estilo Flow).
+   - **Push Notifications** (los pushes silenciosos de CloudKit lo requieren; no piden permiso al usuario).
+   - **Background Modes → Remote notifications** (para que el dispositivo despierte en segundo plano y aplique el bloqueo cuando otro dispositivo inicie la sesión).
 6. Añade `Shared/SharedStore.swift` y `Shared/ShieldController.swift` a la membresía de **los tres targets** (File Inspector → Target Membership), porque las extensiones también los usan.
 7. Compila e instala en tu iPhone/iPad. Al abrir, la app pedirá autorización de Tiempo de Uso (`FamilyControls`) — acéptala.
 
 ## Cómo funciona
 
-- **Botón "Empezar a estudiar"**: aplica el escudo inmediatamente. Se bloquean todas las categorías de apps (`.all(except:)`) menos las que elegiste en el selector. Las llamadas telefónicas y Ajustes nunca se bloquean (restricción de Apple).
+- **Botón "Empezar a estudiar"**: aplica el escudo inmediatamente en este dispositivo y publica la sesión en iCloud; tus otros dispositivos con la app reciben un push silencioso y se bloquean también (con su propia lista local). Se bloquean todas las categorías de apps (`.all(except:)`) menos las que elegiste en el selector. Las llamadas telefónicas y Ajustes nunca se bloquean (restricción de Apple).
 - **Horario automático**: defines hora de inicio y fin; `DeviceActivity` despierta la extensión `StudyBlockerMonitor` a esas horas y aplica/retira el escudo aunque la app esté cerrada.
 - **Pantalla de bloqueo personalizada**: al intentar abrir una app bloqueada aparece "📚 Modo estudio activo" en lugar de la pantalla genérica de Screen Time.
 
@@ -52,12 +64,13 @@ Este repositorio contiene el código fuente; el proyecto de Xcode se crea así (
 
 ```
 StudyBlocker/                    ← App principal (SwiftUI)
-  StudyBlockerApp.swift          ← Entrada; pide autorización de Screen Time
+  StudyBlockerApp.swift          ← Entrada; autorización + recepción de pushes CloudKit
   ContentView.swift              ← UI: selector de apps, botón manual, horario
   Model/StudyModel.swift         ← Estado observable de la app
-  Shared/SharedStore.swift       ← Persistencia compartida (App Group + iCloud)
+  Shared/SharedStore.swift       ← Persistencia compartida (App Group + iCloud KVS)
   Shared/ShieldController.swift  ← Lógica de aplicar/retirar el bloqueo
   Managers/ScheduleController.swift ← Programación con DeviceActivity
+  Managers/CloudSessionSync.swift   ← Sincroniza la sesión entre dispositivos (CloudKit)
 StudyBlockerMonitor/             ← Extensión: activa el bloqueo según horario
   StudyMonitor.swift
 StudyBlockerShieldUI/            ← Extensión: pantalla de bloqueo personalizada
