@@ -37,22 +37,18 @@ Limitación heredada de iOS (afecta igual a Flow): si **fuerzas el cierre** de l
   - Solo si algún día quieres publicarla en el App Store: hay que pedir el entitlement de distribución a Apple en <https://developer.apple.com/contact/request/family-controls-distribution>.
 - Probar en un **dispositivo físico**: las APIs de Screen Time no funcionan en el simulador.
 
-## Cómo montar el proyecto en Xcode
+## Cómo abrir y ejecutar el proyecto en Xcode
 
-Este repositorio contiene el código fuente; el proyecto de Xcode se crea así (5 minutos):
+El proyecto de Xcode ya está incluido (`StudyBlocker.xcodeproj`), con los tres targets configurados: la app, la extensión de horario (`StudyBlockerMonitor`) y la extensión de pantalla de bloqueo (`StudyBlockerShieldUI`). Los `Info.plist`, entitlements, membresías de archivos y el modo de segundo plano para pushes ya están puestos. Solo tienes que personalizarlo con tu cuenta:
 
-1. **Crea la app**: Xcode → *File → New → Project → iOS → App*. Nombre: `StudyBlocker`, interfaz SwiftUI. Borra los archivos generados `ContentView.swift` y `StudyBlockerApp.swift` y arrastra dentro la carpeta `StudyBlocker/` de este repo.
-2. **Crea la extensión de monitoreo**: *File → New → Target → iOS → Device Activity Monitor Extension*. Nombre: `StudyBlockerMonitor`. Sustituye su archivo generado por `StudyBlockerMonitor/StudyMonitor.swift`.
-3. **Crea la extensión de pantalla de bloqueo**: *File → New → Target → iOS → Shield Configuration Extension*. Nombre: `StudyBlockerShieldUI`. Sustituye su archivo por `StudyBlockerShieldUI/ShieldConfigurationProvider.swift`.
-4. **Capabilities** (en los TRES targets: app + 2 extensiones):
-   - **Family Controls**
-   - **App Groups**, con el grupo `group.com.tunombre.studyblocker` (cámbialo por tu identificador y actualiza la constante `appGroupID` en `Shared/SharedStore.swift`).
-5. Solo en la app principal, añade también:
-   - **iCloud → Key-value storage** (sincroniza el horario entre dispositivos) **y CloudKit** con el contenedor por defecto `iCloud.<tu bundle id>` (sincroniza el inicio/fin de sesión entre dispositivos, estilo Flow).
-   - **Push Notifications** (los pushes silenciosos de CloudKit lo requieren; no piden permiso al usuario).
-   - **Background Modes → Remote notifications** (para que el dispositivo despierte en segundo plano y aplique el bloqueo cuando otro dispositivo inicie la sesión).
-6. Añade `Shared/SharedStore.swift` y `Shared/ShieldController.swift` a la membresía de **los tres targets** (File Inspector → Target Membership), porque las extensiones también los usan.
-7. Compila e instala en tu iPhone/iPad. Al abrir, la app pedirá autorización de Tiempo de Uso (`FamilyControls`) — acéptala.
+1. Clona el repo en tu Mac y abre `apple-study-blocker/StudyBlocker.xcodeproj` con doble clic (o desde Xcode: *File → Open*).
+2. En el navegador de proyecto, selecciona el proyecto **StudyBlocker** y, en cada uno de los **tres targets** (pestaña *Signing & Capabilities*):
+   - Elige tu **Team** (tu Apple ID de desarrollador).
+   - Cambia el **Bundle Identifier** a uno tuyo, manteniendo el patrón: `com.tunombre.studyblocker`, `com.tunombre.studyblocker.monitor` y `com.tunombre.studyblocker.shieldui`.
+   - Cambia el **App Group** `group.com.tunombre.studyblocker` por el tuyo (mismo valor en los tres targets) y actualiza la constante `appGroupID` en `StudyBlocker/Shared/SharedStore.swift` para que coincida.
+3. Con firma automática, Xcode registrará solo los App IDs, el App Group, el contenedor de iCloud y el permiso de Family Controls en tu cuenta. Si algún capability aparece en rojo, púlsalo y deja que Xcode lo resuelva.
+4. Conecta tu iPhone/iPad, selecciónalo como destino y pulsa **Run** (⌘R). Al abrir, la app pedirá autorización de Tiempo de Uso (`FamilyControls`) — acéptala.
+5. Repite la instalación en cada dispositivo que quieras que se bloquee, y en cada uno elige sus apps permitidas.
 
 ## Cómo funciona
 
